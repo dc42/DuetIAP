@@ -1,4 +1,4 @@
-/* In-Application Programming application for RepRap Duet (Atmel SAM3X8E)
+/* In-Application Programming application for Duet3D platforms
  *
  * This application is first written by RepRapFirmware to the end of the second
  * Flash bank and then started by RepRapFirmware.
@@ -7,7 +7,7 @@
  * reading the new firmware binary from the SD card and replaces the corresponding
  * Flash content sector by sector.
  *
- * This application was written by Christian Hammacher (2016) and is
+ * This application was written by Christian Hammacher (2016-2019) and is
  * licensed under the terms of the GPL v2.
  */
 
@@ -84,12 +84,32 @@ const Pin DiagLedPin = NoPin;
 const char * const defaultFwFile = "0:/sys/SAME70XPLDFirmware.bin";		// Which file shall we default to used for IAP?
 const char * const fwFilePrefix = "0:/sys/SAME70XPLD";
 
-# else
+# elif !defined(DUET3_V05)
 
 const Pin SdCardDetectPins[NumSdCards] = { PortAPin(6), NoPin };
 const Pin DiagLedPin = PortCPin(20);
 const char * const defaultFwFile = "0:/sys/Duet3Firmware.bin";			// Which file shall we default to used for IAP?
 const char * const fwFilePrefix = "0:/sys/Duet3";
+
+#else
+
+const Pin DiagLedPin = PortCPin(20);
+const uint32_t LINUX_XDMAC_TX_CH_NUM = 3;
+const uint32_t LINUX_XDMAC_RX_CH_NUM = 4;
+const uint8_t DmacChanLinuxTx = 5;				// These two should be
+const uint8_t DmacChanLinuxRx = 6;				// kept in sync with RRF!
+const uint32_t NvicPrioritySpi = 1;
+const Pin LinuxTfrReadyPin = PortEPin(2);
+
+const uint32_t TransferCompleteDelay = 400;								// DCS waits 500ms when the firmware image has been transferred
+const uint32_t TransferTimeout = 2000;									// How long to wait before timing out
+
+struct FlashVerifyRequest
+{
+	uint32_t firmwareLength;
+	uint16_t crc16;
+	uint16_t dummy;
+};
 
 # endif
 
@@ -122,18 +142,25 @@ enum ProcessState
 	ErasingFlash,
 #endif
 	WritingUpgrade,
-	FillingZeros,
+	FillingSpace,
 	LockingFlash
+#ifdef DUET3_V05
+	, VerifyingChecksum,
+	SendingChecksumOK,
+	SendingChecksumError
+#endif
 };
 
 
+#ifndef DUET3_V05
 void initFilesystem();
 void getFirmwareFileName();
 void openBinary();
+#endif
 void writeBinary();
+#ifndef DUET3_V05
 void closeAndDeleteBinary();
+#endif
 void Reset(bool success);
 
 void sendUSB(uint32_t ep, const void* d, uint32_t len);
-
-// vim: ts=4:sw=4
