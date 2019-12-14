@@ -96,7 +96,7 @@ DSTATUS disk_initialize(BYTE drv)
 	int i;
 	Ctrl_status mem_status;
 
-#if (SAM3S || SAM3U || SAM3N || SAM3XA_SERIES || SAM4S)
+#if (SAM3S || SAM3U || SAM3N || SAM3XA || SAM4S)
 	/* Default RTC configuration, 24-hour mode */
 	/**@TODO FIX THIS - need an RTC*/
 	//rtc_set_hour_mode(RTC, 0);

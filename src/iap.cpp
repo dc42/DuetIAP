@@ -2,7 +2,7 @@
  *
  * This application is first written by RepRapFirmware to the end of the second
  * Flash bank and then started by RepRapFirmware.
- * 
+ *
  * Once this program is loaded, it performs in-application programming by
  * reading the new firmware binary from the SD card and replaces the corresponding
  * Flash content sector by sector.
@@ -13,13 +13,12 @@
 
 #include "iap.h"
 #include "DueFlashStorage.h"
-#if defined(DUET3_V05)
-
-#else
+#ifndef IAP_VIA_SPI
 # include "ff.h"
 # include "sd_mmc.h"
 #endif
 #include "rstc/rstc.h"
+#include <General/SafeVsnprintf.h>
 
 #include <cstdarg>
 
@@ -35,7 +34,7 @@ bool ledIsOn;
 
 #endif
 
-#ifndef DUET3_V05
+#ifndef IAP_VIA_SPI
 FATFS fs;
 FIL upgradeBinary;
 
@@ -45,7 +44,7 @@ const char* fwFile = defaultFwFile;
 uint32_t readData32[(blockReadSize + 3) / 4];	// use aligned memory so DMA works well
 char * const readData = reinterpret_cast<char *>(readData32);
 
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 uint32_t writeData32[(blockReadSize + 3) / 4];
 char * const writeData = reinterpret_cast<char *>(writeData32);
 
@@ -57,6 +56,7 @@ uint32_t flashPos = IFLASH_ADDR;
 
 size_t retry = 0;
 size_t bytesRead, bytesWritten;
+bool haveDataInBuffer;
 const size_t reportPercentIncrement = 20;
 size_t reportNextPercent = reportPercentIncrement;
 
@@ -107,7 +107,7 @@ extern "C" void AppMain()
 {
 	SysTickInit();
 
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 	pinMode(LinuxTfrReadyPin, OUTPUT_LOW);
 
 	ConfigurePin(APIN_SBC_SPI_MOSI);
@@ -135,7 +135,7 @@ extern "C" void AppMain()
 	debugPrintf("Developed by Christian Hammacher (2016-2019)\n");
 	debugPrintf("Licensed under the terms of the GPLv2\n\n");
 
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 	memset(writeData, 0x1A, blockReadSize);
 #else
 	initFilesystem();
@@ -151,7 +151,7 @@ extern "C" void AppMain()
 
 /** IAP routines **/
 
-#if defined(DUET3_V05)
+#ifdef IAP_VIA_SPI
 
 # include "xdmac/xdmac.h"
 
@@ -426,7 +426,11 @@ void openBinary()
 		Reset(false);
 	}
 
+#ifdef IAP_IN_RAM
+	const size_t maxFirmwareSize = IFLASH_SIZE;
+#else
 	const size_t maxFirmwareSize = IFLASH_SIZE - iapFirmwareSize;
+#endif
 	if (info.fsize > maxFirmwareSize)
 	{
 		MessageF("ERROR: File %s is too big", fwFile);
@@ -513,60 +517,60 @@ void writeBinary()
 #if SAM4E || SAM4S || SAME70
 	case ErasingFlash:
 		debugPrintf("Erasing 0x%08x\n", flashPos);
-		if (flash_erase_sector(flashPos) == FLASH_RC_OK)
+		if (retry != 0)
 		{
-			retry = 0;
+			MessageF("Erase retry #%u", retry);
+		}
 
+		{
+			const uint32_t sectorSize =
 # if SAM4E || SAM4S
-			// Deal with varying size sectors on the SAM4E
-			// There are two 8K sectors, then one 48K sector, then seven 64K sectors
-			if (flashPos - IFLASH_ADDR < 16 * 1024)
-			{
-				flashPos += 8 * 1024;
-			}
-			else if (flashPos - IFLASH_ADDR == 16 * 1024)
-			{
-				flashPos += 48 * 1024;
-			}
-			else
-			{
-				flashPos += 64 * 1024;
-			}
+				// Deal with varying size sectors on the SAM4E
+				// There are two 8K sectors, then one 48K sector, then seven 64K sectors
+				(flashPos - IFLASH_ADDR < 16 * 1024) ? 8 * 1024
+					: (flashPos - IFLASH_ADDR == 16 * 1024) ? 48 * 1024
+						: 64 * 1024;
 #elif SAME70
-			// Deal with varying size sectors on the SAME70
-			// There are two 8K sectors, then one 112K sector, then the rest are 128K sectors
-			if (flashPos - IFLASH_ADDR < 16 * 1024)
+				// Deal with varying size sectors on the SAME70
+				// There are two 8K sectors, then one 112K sector, then the rest are 128K sectors
+				(flashPos - IFLASH_ADDR < 16 * 1024) ? 8 * 1024
+					: (flashPos - IFLASH_ADDR == 16 * 1024) ? 112 * 1024
+						: 128 * 1024;
+#endif
+
+			if (flash_erase_sector(flashPos) == FLASH_RC_OK)
 			{
-				flashPos += 8 * 1024;
-			}
-			else if (flashPos - IFLASH_ADDR == 16 * 1024)
-			{
-				flashPos += 112 * 1024;
+				// Check that the sector really is erased
+				for (uint32_t p = flashPos; p < flashPos + sectorSize; p += sizeof(uint32_t))
+				{
+					if (*reinterpret_cast<const uint32_t*>(p) != 0xFFFFFFFF)
+					{
+						++retry;
+						break;
+					}
+				}
+				retry = 0;
+				flashPos += sectorSize;
 			}
 			else
 			{
-				flashPos += 128 * 1024;
+				++retry;
 			}
-#endif
-		}
-		else
-		{
-			++retry;
-		}
-		if (flashPos >= firmwareFlashEnd)
-		{
-			flashPos = IFLASH_ADDR;
-			bytesWritten = blockReadSize;
-			state = WritingUpgrade;
+			if (flashPos >= firmwareFlashEnd)
+			{
+				flashPos = IFLASH_ADDR;
+				haveDataInBuffer = false;
+				state = WritingUpgrade;
+			}
 		}
 		break;
 #endif
 
 	case WritingUpgrade:
 		// Attempt to read a chunk from the new firmware file or SBC
-		if (bytesWritten == blockReadSize)
+		if (!haveDataInBuffer)
 		{
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 			if (transferPending)
 			{
 				if (is_spi_transfer_complete())
@@ -599,8 +603,22 @@ void writeBinary()
 			}
 #else
 			debugPrintf("Reading %u bytes from the file\n", blockReadSize);
+			if (retry != 0)
+			{
+				MessageF("Read file retry #%u", retry);
+			}
 
-			FRESULT result = f_read(&upgradeBinary, readData, blockReadSize, &bytesRead);
+			// Seek to the correct place in case we are doing retries
+			FRESULT result = f_lseek(&upgradeBinary, flashPos - IFLASH_ADDR);
+			if (result != FR_OK)
+			{
+				debugPrintf("WARNING: f_lseek returned err %d\n", result);
+				delay_ms(100);
+				retry++;
+				break;
+			}
+
+			result = f_read(&upgradeBinary, readData, blockReadSize, &bytesRead);
 			if (result != FR_OK)
 			{
 				debugPrintf("WARNING: f_read returned err %d\n", result);
@@ -608,99 +626,76 @@ void writeBinary()
 				retry++;
 				break;
 			}
-
-			// Have we finished the file?
-			if (bytesRead != blockReadSize)
-			{
-				// Yes - close and delete it
-				closeAndDeleteBinary();
-
-				// Now we just need to fill up the remaining pages with 0xFF
-				memset(readData + bytesRead, 0xFF, blockReadSize - bytesRead);
-			}
 #endif
 
+			// Have we finished the file?
+			if (bytesRead < blockReadSize)
+			{
+#ifndef IAP_VIA_SPI
+				// Yes - close it
+				closeBinary();
+#endif
+
+				// Now we just need to fill up the remaining part of the buffer with 0xFF
+				memset(readData + bytesRead, 0xFF, blockReadSize - bytesRead);
+			}
+
+			haveDataInBuffer = true;
 			retry = 0;
 			bytesWritten = 0;
 		}
 
 		// Write another page
-		debugPrintf("Writing 0x%08x - 0x%08x\n", flashPos, flashPos + IFLASH_PAGE_SIZE - 1);
-		cpu_irq_disable();
-#if SAM4E || SAM4S || SAME70
-		if (flash_write(flashPos, readData + bytesWritten, IFLASH_PAGE_SIZE, 0) != FLASH_RC_OK)
-#else
-		if (flash_write(flashPos, readData + bytesWritten, IFLASH_PAGE_SIZE, 1) != FLASH_RC_OK)
-#endif
 		{
-			retry++;
-			cpu_irq_enable();
-			break;
-		}
-		cpu_irq_enable();
-
-		// Verify the written data
-		if (memcmp(readData + bytesWritten, reinterpret_cast<void *>(flashPos), IFLASH_PAGE_SIZE) == 0)
-		{
-			bytesWritten += IFLASH_PAGE_SIZE;
-			flashPos += IFLASH_PAGE_SIZE;
-			ShowProgress();
-			if (bytesWritten == blockReadSize && bytesRead != blockReadSize)
+			debugPrintf("Writing 0x%08x - 0x%08x\n", flashPos, flashPos + IFLASH_PAGE_SIZE - 1);
+			if (retry != 0)
 			{
-				memset(readData, 0xFF, IFLASH_PAGE_SIZE);
-				state = FillingSpace;
+				MessageF("Flash write retry #%u", retry);
 			}
-			retry = 0;
-		}
-		else
-		{
-			debugPrintf("Flash compare to 0x%08x - 0x%08x failed\n", flashPos, flashPos + IFLASH_PAGE_SIZE - 1);
-			Reset(false);
-			retry++;
+
+			cpu_irq_disable();
+			const uint32_t rc =
+#if SAM4E || SAM4S || SAME70
+								flash_write(flashPos, readData + bytesWritten, IFLASH_PAGE_SIZE, 0);
+#else
+								flash_write(flashPos, readData + bytesWritten, IFLASH_PAGE_SIZE, 1);
+#endif
+			cpu_irq_enable();
+			if (rc != FLASH_RC_OK)
+			{
+				retry++;
+				break;
+			}
+
+			// Verify the written data
+			if (memcmp(readData + bytesWritten, reinterpret_cast<void *>(flashPos), IFLASH_PAGE_SIZE) == 0)
+			{
+				retry = 0;
+				bytesWritten += IFLASH_PAGE_SIZE;
+				flashPos += IFLASH_PAGE_SIZE;
+				ShowProgress();
+				if (bytesWritten == blockReadSize)
+				{
+					haveDataInBuffer = false;
+#ifdef IAP_VIA_SPI
+					setup_spi(sizeof(FlashVerifyRequest));
+					state = VerifyingChecksum;
+#else
+					if (bytesRead < blockReadSize)
+					{
+						state = LockingFlash;
+					}
+#endif
+				}
+			}
+			else
+			{
+				retry++;
+			}
 		}
 		break;
 
-	case FillingSpace:
-		// We've finished the upgrade process, so fill up the remaining space with zeros
-		debugPrintf("Filling 0x%08x - 0x%08x with 0xFF\n", flashPos, flashPos + IFLASH_PAGE_SIZE - 1);
-
-		cpu_irq_disable();
-#if SAM4E || SAM4S || SAME70
-		if (flash_write(flashPos, readData, IFLASH_PAGE_SIZE, 0) != FLASH_RC_OK)
-#else
-		if (flash_write(flashPos, readData, IFLASH_PAGE_SIZE, 1) != FLASH_RC_OK)
-#endif
-		{
-			retry++;
-			cpu_irq_enable();
-			break;
-		}
-		cpu_irq_enable();
-
-		// Verify the written data
-		if (memcmp(readData, reinterpret_cast<const void *>(flashPos), IFLASH_PAGE_SIZE) == 0)
-		{
-			flashPos += IFLASH_PAGE_SIZE;
-			ShowProgress();
-			if (flashPos >= firmwareFlashEnd)
-			{
-				flashPos = IFLASH_ADDR;
-#ifdef DUET3_V05
-				setup_spi(sizeof(FlashVerifyRequest));
-				state = VerifyingChecksum;
-#else
-				state = LockingFlash;
-#endif
-			}
-			retry = 0;
-		}
-		else
-		{
-			retry++;
-		}
-		break;
-
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 	case VerifyingChecksum:
 		if (millis() - transferStartTime > TransferTimeout)
 		{
@@ -763,45 +758,37 @@ void writeBinary()
 
 	case LockingFlash:
 		// Lock each single page again
-		debugPrintf("Locking 0x%08x - 0x%08x\n", flashPos, flashPos + IFLASH_PAGE_SIZE - 1);
+		{
+			debugPrintf("Locking 0x%08x - 0x%08x\n", flashPos, flashPos + IFLASH_PAGE_SIZE - 1);
 
-		cpu_irq_disable();
-		const bool b = (flash_lock(flashPos, flashPos + IFLASH_PAGE_SIZE - 1, nullptr, nullptr) == FLASH_RC_OK);
-		cpu_irq_enable();
-		if (b)
-		{
-			flashPos += IFLASH_PAGE_SIZE;
-			if (flashPos >= firmwareFlashEnd)
+			cpu_irq_disable();
+			const uint32_t rc = flash_lock(flashPos, flashPos + IFLASH_PAGE_SIZE - 1, nullptr, nullptr);
+			cpu_irq_enable();
+			if (rc == FLASH_RC_OK)
 			{
-				MessageF("Update successful! Rebooting...");
-				debugPrintf("Upgrade successful! Rebooting...\n");
-				Reset(true);
+				flashPos += IFLASH_PAGE_SIZE;
+				if (flashPos >= firmwareFlashEnd)
+				{
+					MessageF("Update successful! Rebooting...");
+					debugPrintf("Upgrade successful! Rebooting...\n");
+					Reset(true);
+				}
+				retry = 0;
 			}
-			retry = 0;
-		}
-		else
-		{
-			retry++;
+			else
+			{
+				retry++;
+			}
 		}
 		break;
 	}
 }
 
-#ifndef DUET3_V05
+#ifndef IAP_VIA_SPI
 // Does what it says
-void closeAndDeleteBinary()
+void closeBinary()
 {
-	// Close the FSO
 	f_close(&upgradeBinary);
-
-# if 1
-	// DC42: we no longer delete the binary. This allows the same SD card to be used repeatedly to upload firmware
-	// to multiple Duets without needing to copy the file back on to the SD card after each one.
-	// It would also allow us to reduce memory usage by compiling FatFS in read-only mode.
-# else
-	// Unlink (delete) the file
-	f_unlink(fwFile);
-# endif
 }
 #endif
 
@@ -824,7 +811,7 @@ void Reset(bool success)
 		cpu_irq_enable();
 	}
 
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 	digitalWrite(LinuxTfrReadyPin, false);
 #endif
 
@@ -845,7 +832,7 @@ void debugPrintf(const char *fmt, ...)
 {
 	va_list vargs;
 	va_start(vargs, fmt);
-	vsnprintf(formatBuffer, ARRAY_SIZE(formatBuffer), fmt, vargs);
+	SafeVsnprintf(formatBuffer, ARRAY_SIZE(formatBuffer), fmt, vargs);
 	va_end(vargs);
 
 #if DEBUG
@@ -859,7 +846,7 @@ void MessageF(const char *fmt, ...)
 {
 	va_list vargs;
 	va_start(vargs, fmt);
-	vsnprintf(formatBuffer, ARRAY_SIZE(formatBuffer), fmt, vargs);
+	SafeVsnprintf(formatBuffer, ARRAY_SIZE(formatBuffer), fmt, vargs);
 	va_end(vargs);
 
 	SERIAL_AUX_DEVICE.print("{\"message\":\"");
@@ -881,6 +868,11 @@ extern "C" void TWI0_Handler()
 extern "C" void TWI1_Handler()
 {
 }
+
+// Cache hooks called from the ASF. These are dummy because we run with the cache disabled.
+extern "C" void CacheFlushBeforeDMAReceive(const volatile void *start, size_t length) { }
+extern "C" void CacheInvalidateAfterDMAReceive(const volatile void *start, size_t length) { }
+extern "C" void CacheFlushBeforeDMASend(const volatile void *start, size_t length) { }
 
 #if DEBUG
 // We have to use our own USB transmit function here, because the core will assume that the USB line is closed

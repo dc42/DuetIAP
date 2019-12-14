@@ -2,7 +2,7 @@
  *
  * This application is first written by RepRapFirmware to the end of the second
  * Flash bank and then started by RepRapFirmware.
- * 
+ *
  * Once this program is loaded, it performs in-application programming by
  * reading the new firmware binary from the SD card and replaces the corresponding
  * Flash content sector by sector.
@@ -84,7 +84,7 @@ const Pin DiagLedPin = NoPin;
 const char * const defaultFwFile = "0:/sys/SAME70XPLDFirmware.bin";		// Which file shall we default to used for IAP?
 const char * const fwFilePrefix = "0:/sys/SAME70XPLD";
 
-# elif !defined(DUET3_V05)
+# elif !defined(IAP_VIA_SPI)
 
 const Pin SdCardDetectPins[NumSdCards] = { PortAPin(6), NoPin };
 const Pin DiagLedPin = PortCPin(20);
@@ -116,13 +116,21 @@ struct FlashVerifyRequest
 const Pin SdWriteProtectPins[NumSdCards] = { NoPin, NoPin };
 const Pin SdSpiCSPins[1] = { NoPin };
 
-const uint32_t iapFirmwareSize = 0x20000;			// 128 KiB max (SAME70 has 128kb flash sectors so we can't erase a smaller amount)
-const uint32_t firmwareFlashEnd = 0x004E0000;		// iape70 is designed to work with >= 1Mbyte flash
+# ifdef IAP_IN_RAM
+const uint32_t firmwareFlashEnd = IFLASH_ADDR + IFLASH_SIZE;
+# else
+const uint32_t iapFirmwareSize = 0x20000;								// 128 KiB max (SAME70 has 128kb flash sectors so we can't erase a smaller amount)
+const uint32_t firmwareFlashEnd = IFLASH_ADDR + 0x000E0000;				// iape70 is designed to work with >= 1Mbyte flash
+#endif
 
 #else	// not a SAME70 variant
 
-const uint32_t iapFirmwareSize = 0x10000;			// 64 KiB max
+# ifdef IAP_IN_RAM
+const uint32_t firmwareFlashEnd = IFLASH_ADDR + IFLASH_SIZE;
+# else
+const uint32_t iapFirmwareSize = 0x10000;								// 64 KiB max
 const uint32_t firmwareFlashEnd = IFLASH_ADDR + IFLASH_SIZE - iapFirmwareSize;
+# endif
 
 #endif
 
@@ -131,8 +139,7 @@ const uint32_t firmwareFlashEnd = IFLASH_ADDR + IFLASH_SIZE - iapFirmwareSize;
 // Unfortunately we cannot increase this value further, because f_read() would mess up data
 const size_t blockReadSize = 2048;
 
-const size_t maxRetries = 5;						// Allow 5 retries max if anything goes wrong
-
+const size_t maxRetries = 5;											// Allow 5 retries max if anything goes wrong
 
 enum ProcessState
 {
@@ -142,9 +149,8 @@ enum ProcessState
 	ErasingFlash,
 #endif
 	WritingUpgrade,
-	FillingSpace,
 	LockingFlash
-#ifdef DUET3_V05
+#ifdef IAP_VIA_SPI
 	, VerifyingChecksum,
 	SendingChecksumOK,
 	SendingChecksumError
@@ -152,14 +158,14 @@ enum ProcessState
 };
 
 
-#ifndef DUET3_V05
+#ifndef IAP_VIA_SPI
 void initFilesystem();
 void getFirmwareFileName();
 void openBinary();
 #endif
 void writeBinary();
-#ifndef DUET3_V05
-void closeAndDeleteBinary();
+#ifndef IAP_VIA_SPI
+void closeBinary();
 #endif
 void Reset(bool success);
 
